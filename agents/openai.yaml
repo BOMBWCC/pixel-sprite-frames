@@ -1,0 +1,3 @@
+display_name: Pixel Sprite Frames
+short_description: Generate pixel sprites, action strips, and simple transparent spritesheets.
+default_prompt: Create a pixel-art sprite with action frames.
