@@ -49,6 +49,40 @@ def chroma_adjacent_count(image: Image.Image, chroma_key: tuple[int, int, int] |
     return count
 
 
+def image_bbox_from_mask(image: Image.Image, predicate) -> tuple[int, int, int, int] | None:
+    pixels = image.convert("RGBA").load()
+    min_x = image.width
+    min_y = image.height
+    max_x = -1
+    max_y = -1
+    count = 0
+    for y in range(image.height):
+        for x in range(image.width):
+            red, green, blue, alpha = pixels[x, y]
+            if alpha > 16 and predicate(red, green, blue):
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+                count += 1
+    if count == 0:
+        return None
+    return (min_x, min_y, max_x + 1, max_y + 1)
+
+
+def core_body_predicate(subject: str):
+    lowered = subject.lower()
+    if any(term in lowered for term in ("black", "dark", "shadow", "charcoal")):
+        return lambda red, green, blue: max(red, green, blue) <= 120 and (red + green + blue) <= 270
+    return lambda red, green, blue: True
+
+
+def compute_bbox_area(bbox: tuple[int, int, int, int] | None) -> int:
+    if bbox is None:
+        return 0
+    return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
+
+
 def load_json(path: Path) -> dict[str, object]:
     if not path.is_file():
         raise SystemExit(f"missing file: {path}")
@@ -91,6 +125,9 @@ def inspect_action(
 ) -> dict[str, object]:
     action_id = str(action["id"])
     expected_count = int(action["frames"])
+    size_target = action.get("size_target") if isinstance(action.get("size_target"), dict) else None
+    subject = str(args.subject)
+    core_predicate = core_body_predicate(subject)
     expected_size = (int(args.cell_width), int(args.cell_height))
     manifest_action = manifest_by_action.get(action_id, {})
     method = manifest_action.get("method")
@@ -100,6 +137,7 @@ def inspect_action(
     frames: list[dict[str, object]] = []
     areas: list[int] = []
     bbox_areas: list[int] = []
+    core_areas: list[int] = []
 
     if len(files) != expected_count:
         errors.append(f"expected {expected_count} frame files for {action_id}, found {len(files)}")
@@ -113,9 +151,18 @@ def inspect_action(
             frame = opened.convert("RGBA")
         nontransparent = alpha_nonzero_count(frame)
         bbox = frame.getbbox()
-        bbox_area = 0
-        if bbox:
-            bbox_area = max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
+        visible_bbox_area = compute_bbox_area(bbox)
+        core_bbox = image_bbox_from_mask(frame, core_predicate)
+        core_body_area = compute_bbox_area(core_bbox)
+        core_body_pixels = 0
+        if core_bbox is not None:
+            data = frame.convert("RGBA").tobytes()
+            core_body_pixels = sum(
+                1
+                for index in range(0, len(data), 4)
+                for red, green, blue, alpha in (data[index : index + 4],)
+                if alpha > 16 and core_predicate(red, green, blue)
+            )
         edge_pixels = edge_alpha_count(frame, args.edge_margin)
         chroma_adjacent_pixels = chroma_adjacent_count(frame, chroma_key, args.chroma_adjacent_threshold)
         frames.append(
@@ -126,13 +173,17 @@ def inspect_action(
                 "height": frame.height,
                 "nontransparent_pixels": nontransparent,
                 "bbox": list(bbox) if bbox else None,
-                "bbox_area": bbox_area,
+                "bbox_area": visible_bbox_area,
+                "core_body_pixels": core_body_pixels,
+                "core_body_bbox": list(core_bbox) if core_bbox else None,
+                "core_body_bbox_area": core_body_area,
                 "edge_pixels": edge_pixels,
                 "chroma_adjacent_pixels": chroma_adjacent_pixels,
             }
         )
         areas.append(nontransparent)
-        bbox_areas.append(bbox_area)
+        bbox_areas.append(visible_bbox_area)
+        core_areas.append(core_body_area)
         if frame.size != expected_size:
             errors.append(f"{action_id} frame {index:02d} is {frame.width}x{frame.height}; expected {expected_size[0]}x{expected_size[1]}")
         if nontransparent < args.min_used_pixels:
@@ -141,6 +192,15 @@ def inspect_action(
             warnings.append(f"{action_id} frame {index:02d} has {edge_pixels} non-transparent pixels near the cell edge")
         if chroma_adjacent_pixels > args.chroma_adjacent_pixel_threshold:
             errors.append(f"{action_id} frame {index:02d} has {chroma_adjacent_pixels} non-transparent pixels close to the chroma key")
+        if bbox and size_target:
+            bbox_width = bbox[2] - bbox[0]
+            bbox_height = bbox[3] - bbox[1]
+            width_min, width_max = size_target.get("bbox_width_px", [0, 10**9])
+            height_min, height_max = size_target.get("bbox_height_px", [0, 10**9])
+            if bbox_width < int(width_min) or bbox_width > int(width_max):
+                warnings.append(f"{action_id} frame {index:02d} visible bbox width {bbox_width}px is outside suggested {width_min}-{width_max}px")
+            if bbox_height < int(height_min) or bbox_height > int(height_max):
+                warnings.append(f"{action_id} frame {index:02d} visible bbox height {bbox_height}px is outside suggested {height_min}-{height_max}px")
 
     if areas:
         row_median = median(areas)
@@ -156,11 +216,19 @@ def inspect_action(
                 warnings.append(f"{action_id} frame {index:02d} has a much smaller visible bounding box than the action median ({bbox_area} vs {bbox_median:.0f})")
             if bbox_median > 0 and bbox_area > bbox_median * args.large_bbox_outlier_ratio:
                 warnings.append(f"{action_id} frame {index:02d} has a much larger visible bounding box than the action median ({bbox_area} vs {bbox_median:.0f})")
+    if core_areas:
+        core_median = median(core_areas)
+        for index, core_area in enumerate(core_areas[:expected_count]):
+            if core_median > 0 and core_area < core_median * args.small_core_body_outlier_ratio:
+                warnings.append(f"{action_id} frame {index:02d} has a much smaller core body color bbox than the action median ({core_area} vs {core_median:.0f})")
+            if core_median > 0 and core_area > core_median * args.large_core_body_outlier_ratio:
+                warnings.append(f"{action_id} frame {index:02d} has a much larger core body color bbox than the action median ({core_area} vs {core_median:.0f})")
 
     return {
         "action": action_id,
         "expected_frames": expected_count,
         "actual_frames": len(files),
+        "size_target": size_target,
         "extraction_method": method,
         "ok": not errors,
         "errors": errors,
@@ -182,6 +250,8 @@ def main() -> None:
     parser.add_argument("--large-outlier-ratio", type=float, default=2.75)
     parser.add_argument("--small-bbox-outlier-ratio", type=float, default=0.60)
     parser.add_argument("--large-bbox-outlier-ratio", type=float, default=1.45)
+    parser.add_argument("--small-core-body-outlier-ratio", type=float, default=0.65)
+    parser.add_argument("--large-core-body-outlier-ratio", type=float, default=1.40)
     parser.add_argument("--require-components", action="store_true", help="Fail actions that fell back to equal-slot extraction.")
     args = parser.parse_args()
 
@@ -190,6 +260,7 @@ def main() -> None:
     frames_manifest = load_json(run_dir / "frames" / "frames-manifest.json")
     args.cell_width = int(request["cell_width"])
     args.cell_height = int(request["cell_height"])
+    args.subject = str(request.get("subject", ""))
     actions = request.get("actions")
     if not isinstance(actions, list):
         raise SystemExit("sprite_request.json actions must be a list")

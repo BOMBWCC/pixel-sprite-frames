@@ -76,6 +76,19 @@ Spritesheet layout guidance:
 - If any action needs more than `grid_columns` frames, split it into multiple actions/rows before generation instead of letting it wrap into the next row.
 - Use packed sequential layout only when the user explicitly asks to minimize sheet area or requests a packed grid.
 
+Size consistency guidance:
+
+- Do not ask ordinary users to provide pixel bbox ranges. Infer suggested visible bbox ranges from the action type and cell size, then state them in the plan.
+- Default action targets for a `96x96` cell are approximately: lying/sleeping `72-86px` wide and `34-53px` tall; walking/running `67-84px` wide and `62-82px` tall; sitting/idle/grooming `53-84px` wide and `67-86px` tall.
+- Treat these as QA guidance, not hard creative constraints. Pose changes can alter width/height, but same-action frames should not visibly scale up or shrink.
+- The scripts write inferred `size_target` data into each action in `sprite_request.json`; `inspect_sprite_frames.py` reports visible bbox and core body-color bbox metrics and warns on outliers.
+
+Action reference guidance:
+
+- For high-consistency animation assets, recommend generating one action keyframe or first-frame reference per action after the canonical base is approved and before full action strips.
+- Use action keyframes to lock direction, approximate pose scale, anchor, and body/head proportions. They are especially useful for locomotion, crouching, lying, attacks, and actions where the silhouette changes a lot.
+- Do not require action keyframes for quick drafts. Offer the tradeoff: fewer generations and faster output versus better scale/identity consistency.
+
 ## Deterministic Assembly
 
 Do not rely on an image model to create final spritesheet geometry. Generated images may look like a grid while still having uneven row heights, inconsistent gutters, or no real alpha channel.
@@ -93,9 +106,10 @@ The normal pipeline is:
 1. Prepare a run folder with `sprite_request.json`, prompt files, `imagegen-jobs.json`, and layout guides.
 2. Generate a canonical base sprite with `$imagegen`.
 3. Record the selected base image with `record_sprite_result.py`; this creates `references/canonical-base.png`.
-4. Generate each action strip with `$imagegen`, attaching the canonical base, user references, and the matching layout guide.
-5. Record each selected strip with `record_sprite_result.py`.
-6. Finalize the run. `finalize_sprite_run.py` removes chroma key with soft matte + despill, extracts uniform cells, writes `qa/review.json`, composes the strict grid, validates alpha/grid geometry, and creates a contact sheet.
+4. For high-consistency runs, generate and approve one action keyframe/first-frame reference per action. Use these as pose/scale references for the full strip.
+5. Generate each action strip with `$imagegen`, attaching the canonical base, user references, action keyframe references when available, and the matching layout guide.
+6. Record each selected strip with `record_sprite_result.py`.
+7. Finalize the run. `finalize_sprite_run.py` removes chroma key with soft matte + despill, extracts uniform cells, writes `qa/review.json`, composes the strict grid, validates alpha/grid geometry, and creates a contact sheet.
 
 The final spritesheet must have exact dimensions:
 
@@ -160,6 +174,7 @@ Keep project-bound final files in the current workspace unless the user names a 
    - output type: single sprite, action strip, or spritesheet
    - cell size, frame count, and actions if provided
    - reference image roles, if any
+   - inferred size targets per action, unless the user provides explicit ranges
 
 2. Create or select a canonical base sprite:
    - For text-only requests, generate a base sprite first.
@@ -167,22 +182,30 @@ Keep project-bound final files in the current workspace unless the user names a 
    - Treat the accepted base as the identity lock for all action frames.
    - Stop after generating and recording the canonical base sprite. Show the base image to the user and wait for explicit approval before generating any action strips. Do not proceed from base to action generation on implied approval.
 
-3. Generate action strips:
+3. Optionally generate action keyframes:
+   - Use this for high-consistency or production-bound outputs, or when actions differ strongly in silhouette.
+   - Generate one first-frame/key-pose reference per action using the canonical base and inferred size target.
+   - Show the keyframes for approval before full strips when the user cares about scale/pose consistency.
+
+4. Generate action strips:
    - Attach the canonical base and relevant references whenever supported.
+   - Attach approved action keyframes when available as pose/scale references.
    - Attach the matching layout guide for every action strip.
    - Prompt each action as a row of evenly spaced full-body frames in identical cell slots.
+   - Include the inferred target visible bbox range and core body-color consistency requirement in the prompt.
    - Keep the same silhouette, proportions, palette, face, markings, outfit, prop design, outline weight, and facing logic.
    - Do not accept a strip where frames look like different characters or where the model copied visible grid lines into the art.
 
-4. Remove chroma key and assemble:
+5. Remove chroma key and assemble:
    - Use chroma-key generation for transparent assets. Do not rely on model-native transparency in the built-in path.
    - Prefer a key color far from the subject palette. If the subject is black/dark, avoid magenta unless the user requests it; magenta often leaks into dark outlines as purple spill.
    - Assemble strips or sheets only from generated outputs using deterministic scripts.
    - Preserve transparent unused cells if a grid contains blank slots.
    - Write a small manifest with `cell_width`, `cell_height`, `layout_mode`, `actions`, frame counts, row/column cells, transparent unused cells, and durations when producing animation assets.
 
-5. Review before delivery:
+6. Review before delivery:
    - Inspect the final PNG/WebP and any contact sheet or preview.
+   - Check visible bbox and core body-color bbox warnings in `qa/review.json`; regenerate the smallest failing action when a frame visibly changes scale.
    - Reject identity drift, cropped limbs, slot-crossing poses, repeated identical frames, opaque rectangular backgrounds, key-color residue, shadows/glows/dust trails that break extraction, and detached effects that should be part of the sprite.
 
 ## Prompt Template: Base Sprite
@@ -200,6 +223,8 @@ Avoid: text, labels, watermark, scenery, floor shadow, contact shadow, glow, blu
 ```text
 Create a horizontal pixel-art animation strip for <action>.
 Frame layout: exactly <N> separate full-body frames, evenly spaced left to right, each fitting inside a <W>x<H> cell with generous padding. Keep the visible sprite size and bounding box consistent between frames.
+Target visible bbox: keep the sprite roughly <minW>-<maxW> px wide and <minH>-<maxH> px tall inside each cell, based on the inferred action size target.
+Core body color region: keep the main body/head mass similar in size and position between frames; limbs, tail, small effects, tongue, and highlights may vary.
 Identity lock: preserve the same character/object as the canonical base: silhouette, proportions, face, palette, markings, outfit, props, and outline weight.
 Animation: <action-specific pose progression>.
 Style: crisp pixel-art sprite, chunky silhouette, dark 1-2 px outline, limited palette, flat cel shading.
@@ -214,7 +239,7 @@ Avoid: cropped body parts, overlapping frames, poses crossing into neighboring s
 - `scripts/extract_strip_frames.py`: removes chroma-key background with soft matte + despill, extracts each action strip into uniform transparent frame cells using connected components first and equal slots as fallback, and writes `frames/frames-manifest.json`.
 - `scripts/compose_spritesheet.py`: composes uniform frames into an exact grid PNG/WebP with `final/spritesheet-manifest.json`.
 - `scripts/validate_spritesheet.py`: checks exact dimensions, alpha channel, used/unused cells, and likely opaque-background failures.
-- `scripts/inspect_sprite_frames.py`: writes `qa/review.json` with per-action frame counts, extraction method, edge-pixel warnings, chroma-key residue checks, and size outlier checks.
+- `scripts/inspect_sprite_frames.py`: writes `qa/review.json` with per-action frame counts, extraction method, edge-pixel warnings, chroma-key residue checks, visible bbox checks, and core body-color bbox checks.
 - `scripts/make_contact_sheet.py`: creates a checkerboard QA contact sheet for visual review.
 - `scripts/finalize_sprite_run.py`: runs extraction, composition, validation, and contact-sheet generation.
 
@@ -257,6 +282,7 @@ Do not call the asset complete until these pass:
 - Component extraction was used, unless slot extraction was explicitly allowed after visual review.
 - Every frame fits inside its cell with no clipping.
 - No frame is noticeably larger or smaller than adjacent frames in the same action unless the action explicitly calls for scale change.
+- Visible bbox and core body-color bbox warnings have been reviewed; scale outliers are repaired or intentionally accepted.
 - Transparent output has clean alpha and no visible chroma-key fringe.
 - Character identity is consistent across frames and actions.
 - The animation progression is readable and not just repeated copies.

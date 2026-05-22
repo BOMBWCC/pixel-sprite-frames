@@ -59,6 +59,44 @@ def parse_action(raw: str) -> dict[str, object]:
     return {"id": action_id, "frames": frames, "description": description}
 
 
+def pixel_range(size: int, low: float, high: float) -> list[int]:
+    return [round(size * low), round(size * high)]
+
+
+def infer_size_target(action: dict[str, object], cell_width: int, cell_height: int) -> dict[str, object]:
+    action_id = str(action["id"]).lower()
+    description = str(action.get("description", "")).lower()
+    text = f"{action_id} {description}"
+    if any(term in text for term in ("sleep", "snore", "lie", "lying", "crawl", "crouch-low")):
+        category = "lying-low"
+        width_ratio = (0.75, 0.90)
+        height_ratio = (0.35, 0.55)
+    elif any(term in text for term in ("walk", "run", "locomotion", "move-left", "move-right")):
+        category = "locomotion"
+        width_ratio = (0.70, 0.88)
+        height_ratio = (0.65, 0.85)
+    elif any(term in text for term in ("groom", "clean", "lick", "wipe")):
+        category = "upright-active"
+        width_ratio = (0.55, 0.88)
+        height_ratio = (0.70, 0.90)
+    elif any(term in text for term in ("sit", "idle", "breathe", "breathing", "stand", "standing")):
+        category = "upright-calm"
+        width_ratio = (0.55, 0.88)
+        height_ratio = (0.70, 0.90)
+    else:
+        category = "generic"
+        width_ratio = (0.60, 0.85)
+        height_ratio = (0.55, 0.85)
+    return {
+        "category": category,
+        "bbox_width_px": pixel_range(cell_width, *width_ratio),
+        "bbox_height_px": pixel_range(cell_height, *height_ratio),
+        "bbox_width_ratio": list(width_ratio),
+        "bbox_height_ratio": list(height_ratio),
+        "guidance": "Suggested target visible bounding-box range; QA warns when frames fall outside it.",
+    }
+
+
 def parse_hex_color(value: str) -> tuple[int, int, int]:
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
         raise SystemExit(f"invalid chroma key color: {value}; expected #RRGGBB")
@@ -193,13 +231,23 @@ def strip_prompt(
             f"generate only the first {frames} poses for this action. The remaining {empty} final row cells "
             "will be transparent and must not be represented in the generated strip."
         )
+    size_target = action.get("size_target")
+    size_note = ""
+    if isinstance(size_target, dict):
+        size_note = (
+            f"\nTarget visible bbox: keep the sprite's non-transparent body roughly "
+            f"{size_target['bbox_width_px'][0]}-{size_target['bbox_width_px'][1]} px wide and "
+            f"{size_target['bbox_height_px'][0]}-{size_target['bbox_height_px'][1]} px tall inside each "
+            f"{cell_width}x{cell_height} cell. Pose changes may alter shape, but the character should not noticeably scale up or shrink."
+            "\nCore body color region: keep the main body/head mass similar in size and position between frames; limbs, tail, tongue, and tiny highlights may vary."
+        )
     return f"""Create one horizontal pixel-art animation strip for action `{action["id"]}`.
 
 Use the attached canonical base sprite and any user reference images as the identity lock. Use the attached layout guide only for frame count, equal slot spacing, centering, and safe padding. Do not copy any visible guide lines, labels, colors, boxes, or marks.
 
 Subject: {subject}.
 Action progression: {action["description"]}.
-Frame layout: exactly {frames} full-body frames, left to right, one complete pose per invisible {cell_width}x{cell_height} cell. Keep each pose centered inside its cell with safe transparent padding. Keep the visible sprite size and bounding box consistent from frame to frame; do not let one pose become noticeably larger or smaller than the others. No pose may cross into a neighboring slot.{row_note}
+Frame layout: exactly {frames} full-body frames, left to right, one complete pose per invisible {cell_width}x{cell_height} cell. Keep each pose centered inside its cell with safe transparent padding. Keep the visible sprite size and bounding box consistent from frame to frame; do not let one pose become noticeably larger or smaller than the others. No pose may cross into a neighboring slot.{row_note}{size_note}
 Identity lock: preserve the same silhouette, proportions, face, palette, markings, outfit, props, outline weight, and facing logic from the canonical base.
 Style: compact readable pixel-art-adjacent game sprite, chunky silhouette, crisp stepped edges, dark 1-2 px outline, limited palette, flat cel shading, no soft gradients.
 Additional style notes: {style_notes or "none"}.
@@ -270,6 +318,8 @@ def main() -> None:
     args = parser.parse_args()
 
     actions = [parse_action(raw) for raw in args.action] or [parse_action("animation:4:basic readable animation loop")]
+    for action in actions:
+        action["size_target"] = infer_size_target(action, args.cell_width, args.cell_height)
     action_ids = [str(action["id"]) for action in actions]
     duplicate_ids = sorted({action_id for action_id in action_ids if action_ids.count(action_id) > 1})
     if duplicate_ids:
