@@ -21,16 +21,22 @@ Do not locally draw, tile, or synthesize missing sprite poses as a substitute fo
 
 The deterministic scripts require Python and Pillow.
 
-Before running any script in `scripts/`, the agent must ensure dependencies are available in the active Python environment. Prefer checking first:
+Before running any script in `scripts/`, the agent must choose an available Python interpreter for the current environment:
+
+- On macOS and Linux, prefer `python3`.
+- On Windows, prefer `python`.
+- If the preferred command is unavailable, probe common alternatives such as `python`, `python3`, or the Codex bundled Python runtime.
+
+Use the selected interpreter consistently as `<python>` for dependency checks and script commands. Prefer checking first:
 
 ```text
-python -c "import PIL; print(PIL.__version__)"
+<python> -c "import PIL; print(PIL.__version__)"
 ```
 
 If Pillow is missing, install from this skill's dependency file:
 
 ```text
-python -m pip install -r <skill-dir>/scripts/requirements.txt
+<python> -m pip install -r <skill-dir>/scripts/requirements.txt
 ```
 
 `<skill-dir>` is the directory containing this `SKILL.md`, for example `${CODEX_HOME:-$HOME/.codex}/skills/pixel-sprite-frames`.
@@ -43,7 +49,7 @@ For pixel animation and spritesheet requests, ask the user for these choices bef
 
 - `pixel/cell size`: width and height of each animation cell, for example `64x64`, `96x96`, `128x128`, or `192x192`.
 - `frame count`: total frames and, when there are multiple actions, frames per action.
-- `actions`: the animation beats or named actions, for example `idle`, `walk-right`, `punch`, `hit-reaction`, `dizzy`.
+- `actions`: the animation beats or named actions, for example `idle`, `walk-right`, `punch`, `hit-reaction`, `dizzy`. Action ids must be English ASCII identifiers using letters, digits, hyphens, or underscores, and must start with a letter. Put non-English detail in the action description, not the id.
 - `layout`: strip or grid, including columns and rows for spritesheets, for example `4x4`.
 - `direction/facing`: left, right, front, or preserved from reference.
 - `target use`: Pixelorama, Godot, Unity, web/canvas, sticker, UI mascot, prototype, etc.
@@ -69,9 +75,9 @@ Do not rely on an image model to create final spritesheet geometry. Generated im
 For project-bound animation outputs, use the scripts in `scripts/`:
 
 ```text
-python scripts/prepare_sprite_run.py --subject "<subject>" --action "<id>:<frames>:<description>" --cell-width <W> --cell-height <H> --grid-columns <C> --grid-rows <R>
-python scripts/record_sprite_result.py --run-dir <run> --job-id <job-id> --source <generated-imagegen-output.png>
-python scripts/finalize_sprite_run.py --run-dir <run>
+<python> scripts/prepare_sprite_run.py --subject "<subject>" --action "<english-id>:<frames>:<description>" --cell-width <W> --cell-height <H> --grid-columns <C> --grid-rows <R>
+<python> scripts/record_sprite_result.py --run-dir <run> --job-id <job-id> --source <generated-imagegen-output.png>
+<python> scripts/finalize_sprite_run.py --run-dir <run>
 ```
 
 The normal pipeline is:
@@ -81,7 +87,7 @@ The normal pipeline is:
 3. Record the selected base image with `record_sprite_result.py`; this creates `references/canonical-base.png`.
 4. Generate each action strip with `$imagegen`, attaching the canonical base, user references, and the matching layout guide.
 5. Record each selected strip with `record_sprite_result.py`.
-6. Finalize the run. `finalize_sprite_run.py` removes chroma key, extracts uniform cells, composes the strict grid, validates alpha/grid geometry, and creates a contact sheet.
+6. Finalize the run. `finalize_sprite_run.py` removes chroma key, extracts uniform cells, writes `qa/review.json`, composes the strict grid, validates alpha/grid geometry, and creates a contact sheet.
 
 The final spritesheet must have exact dimensions:
 
@@ -105,6 +111,8 @@ The guide tells the image model:
 - no slot crossing
 
 The final generated strip must not visibly include guide boxes, guide colors, center marks, labels, grid lines, or frame numbers. Reject and regenerate strips that copy the guide.
+
+The layout guide should prevent slot-crossing in normal outputs. Finalization still treats generated strips as untrusted input: extraction uses connected sprite components first when possible, falls back to equal slots only when component extraction cannot identify the requested frame count, and the contact sheet must be visually reviewed before acceptance. By default, finalization fails if an action falls back to slot extraction; rerun with `--allow-slot-extraction` only after visually accepting the contact sheet. If the contact sheet shows copied guide pixels, cropped poses, repeated tiles, edge slivers, or partial neighboring sprites, regenerate the smallest failing action strip.
 
 ## Default Style
 
@@ -145,6 +153,7 @@ Keep project-bound final files in the current workspace unless the user names a 
    - For text-only requests, generate a base sprite first.
    - For reference-driven requests, generate a simplified pixel-style base from the reference.
    - Treat the accepted base as the identity lock for all action frames.
+   - Stop after generating and recording the canonical base sprite. Show the base image to the user and wait for explicit approval before generating any action strips. Do not proceed from base to action generation on implied approval.
 
 3. Generate action strips:
    - Attach the canonical base and relevant references whenever supported.
@@ -189,9 +198,10 @@ Avoid: cropped body parts, overlapping frames, poses crossing into neighboring s
 
 - `scripts/prepare_sprite_run.py`: creates a generic sprite run, layout guides, prompts, and imagegen job manifest.
 - `scripts/record_sprite_result.py`: records selected `$imagegen` outputs into the run and stores the canonical base.
-- `scripts/extract_strip_frames.py`: removes chroma-key background, cuts each action strip into uniform transparent frame cells, and writes `frames/frames-manifest.json`.
+- `scripts/extract_strip_frames.py`: removes chroma-key background, extracts each action strip into uniform transparent frame cells using connected components first and equal slots as fallback, and writes `frames/frames-manifest.json`.
 - `scripts/compose_spritesheet.py`: composes uniform frames into an exact grid PNG/WebP with `final/spritesheet-manifest.json`.
 - `scripts/validate_spritesheet.py`: checks exact dimensions, alpha channel, used/unused cells, and likely opaque-background failures.
+- `scripts/inspect_sprite_frames.py`: writes `qa/review.json` with per-action frame counts, extraction method, edge-pixel warnings, chroma-key residue checks, and size outlier checks.
 - `scripts/make_contact_sheet.py`: creates a checkerboard QA contact sheet for visual review.
 - `scripts/finalize_sprite_run.py`: runs extraction, composition, validation, and contact-sheet generation.
 
@@ -230,12 +240,15 @@ Avoid by default:
 Do not call the asset complete until these pass:
 
 - Each requested frame/action exists.
+- `qa/review.json` has no errors.
+- Component extraction was used, unless slot extraction was explicitly allowed after visual review.
 - Every frame fits inside its cell with no clipping.
 - Transparent output has clean alpha and no visible chroma-key fringe.
 - Character identity is consistent across frames and actions.
 - The animation progression is readable and not just repeated copies.
 - First/last frames loop acceptably for looping actions.
 - No forbidden effects, text, shadows, guide marks, or opaque cell backgrounds remain.
+- Contact sheet has been visually reviewed; visible layout guide pixels, cropped references, repeated tiles, edge slivers, or partial neighboring sprites are blockers.
 - Final assets and manifest are saved in the workspace or requested destination.
 
 ## When To Use Hatch Pet Instead

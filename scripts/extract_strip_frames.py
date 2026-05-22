@@ -57,6 +57,107 @@ def fit_to_cell(image: Image.Image, cell_width: int, cell_height: int, padding: 
     return target
 
 
+def connected_components(image: Image.Image) -> list[dict[str, object]]:
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    alpha = rgba.getchannel("A")
+    visited = bytearray(width * height)
+    components: list[dict[str, object]] = []
+
+    for start_index, value in enumerate(alpha.tobytes()):
+        if value == 0 or visited[start_index]:
+            continue
+        stack = [start_index]
+        visited[start_index] = 1
+        pixels: list[int] = []
+        min_x = width
+        min_y = height
+        max_x = 0
+        max_y = 0
+
+        while stack:
+            index = stack.pop()
+            pixels.append(index)
+            x = index % width
+            y = index // width
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + 1)
+            max_y = max(max_y, y + 1)
+
+            for neighbor in (index - 1, index + 1, index - width, index + width):
+                if neighbor < 0 or neighbor >= width * height or visited[neighbor]:
+                    continue
+                nx = neighbor % width
+                if abs(nx - x) > 1:
+                    continue
+                if alpha.getpixel((nx, neighbor // width)) == 0:
+                    continue
+                visited[neighbor] = 1
+                stack.append(neighbor)
+
+        area = len(pixels)
+        if area:
+            components.append(
+                {
+                    "area": area,
+                    "bbox": (min_x, min_y, max_x, max_y),
+                    "center_x": (min_x + max_x) / 2,
+                    "pixels": pixels,
+                }
+            )
+
+    return components
+
+
+def component_group_image(source: Image.Image, components: list[dict[str, object]], padding: int = 4) -> Image.Image:
+    width, height = source.size
+    min_x = max(0, min(component["bbox"][0] for component in components) - padding)
+    min_y = max(0, min(component["bbox"][1] for component in components) - padding)
+    max_x = min(width, max(component["bbox"][2] for component in components) + padding)
+    max_y = min(height, max(component["bbox"][3] for component in components) + padding)
+
+    output = Image.new("RGBA", (max_x - min_x, max_y - min_y), (0, 0, 0, 0))
+    source_pixels = source.load()
+    output_pixels = output.load()
+    for component in components:
+        for pixel_index in component["pixels"]:
+            x = pixel_index % width
+            y = pixel_index // width
+            output_pixels[x - min_x, y - min_y] = source_pixels[x, y]
+    return output
+
+
+def extract_component_frames(strip: Image.Image, frame_count: int, cell_width: int, cell_height: int, padding: int) -> list[Image.Image] | None:
+    components = connected_components(strip)
+    if not components:
+        return None
+
+    largest_area = max(component["area"] for component in components)
+    seed_threshold = max(120, largest_area * 0.20)
+    seeds = [component for component in components if component["area"] >= seed_threshold]
+    if len(seeds) < frame_count:
+        seeds = sorted(components, key=lambda component: component["area"], reverse=True)[:frame_count]
+    if len(seeds) < frame_count:
+        return None
+
+    seeds = sorted(
+        sorted(seeds, key=lambda component: component["area"], reverse=True)[:frame_count],
+        key=lambda component: component["center_x"],
+    )
+    seed_ids = {id(seed) for seed in seeds}
+    groups: list[list[dict[str, object]]] = [[seed] for seed in seeds]
+    noise_threshold = max(12, largest_area * 0.002)
+
+    for component in components:
+        if id(component) in seed_ids or component["area"] < noise_threshold:
+            continue
+        nearest_index = min(range(len(seeds)), key=lambda index: abs(seeds[index]["center_x"] - component["center_x"]))
+        groups[nearest_index].append(component)
+
+    return [fit_to_cell(component_group_image(strip, group), cell_width, cell_height, padding) for group in groups]
+
+
 def extract_slots(strip: Image.Image, frame_count: int, cell_width: int, cell_height: int, padding: int) -> list[Image.Image]:
     slot_width = strip.width / frame_count
     frames = []
@@ -78,6 +179,12 @@ def main() -> None:
     parser.add_argument("--chroma-key")
     parser.add_argument("--key-threshold", type=float, default=96.0)
     parser.add_argument("--padding", type=int, default=6)
+    parser.add_argument(
+        "--method",
+        choices=("auto", "components", "slots"),
+        default="auto",
+        help="Use connected sprite components when possible, or fixed equal slots.",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).expanduser().resolve()
@@ -100,7 +207,17 @@ def main() -> None:
             raise SystemExit(f"missing generated strip for {action_id}: {strip_path}")
         with Image.open(strip_path) as opened:
             strip = remove_chroma_background(opened, chroma_key, args.key_threshold)
-        frames = extract_slots(strip, frame_count, cell_width, cell_height, args.padding)
+        frames = None
+        used_method = args.method
+        if args.method in {"auto", "components"}:
+            frames = extract_component_frames(strip, frame_count, cell_width, cell_height, args.padding)
+            if frames is None and args.method == "components":
+                raise SystemExit(f"could not find {frame_count} sprite components in {strip_path}")
+            if frames is not None:
+                used_method = "components"
+        if frames is None:
+            frames = extract_slots(strip, frame_count, cell_width, cell_height, args.padding)
+            used_method = "slots"
         action_dir = run_dir / "frames" / action_id
         action_dir.mkdir(parents=True, exist_ok=True)
         outputs = []
@@ -109,7 +226,7 @@ def main() -> None:
             frame.save(output)
             outputs.append({"path": str(output.relative_to(run_dir)), "index": frame_index, "action_index": local_index, "nontransparent_pixels": alpha_nonzero_count(frame)})
             frame_index += 1
-        rows.append({"action": action_id, "frames": outputs})
+        rows.append({"action": action_id, "frames": outputs, "method": used_method})
 
     manifest = {
         "ok": True,

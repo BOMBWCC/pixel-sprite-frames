@@ -26,6 +26,9 @@ DEFAULT_CELL_WIDTH = 128
 DEFAULT_CELL_HEIGHT = 128
 
 
+ACTION_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
 def slugify(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
@@ -33,9 +36,20 @@ def slugify(value: str) -> str:
     return value.strip("-") or "pixel-sprite"
 
 
+def normalize_action_id(value: str) -> str:
+    raw = value.strip()
+    if not ACTION_ID_RE.fullmatch(raw):
+        raise SystemExit(
+            "action id must be an English ASCII identifier starting with a letter "
+            "and using only letters, digits, hyphens, or underscores; "
+            "examples: idle, walk-right, punch, hit-reaction"
+        )
+    return raw.lower().replace("_", "-")
+
+
 def parse_action(raw: str) -> dict[str, object]:
     parts = [part.strip() for part in raw.split(":", 2)]
-    action_id = slugify(parts[0])
+    action_id = normalize_action_id(parts[0])
     frames = int(parts[1]) if len(parts) >= 2 and parts[1] else 4
     description = parts[2] if len(parts) >= 3 else parts[0].strip()
     if frames <= 0:
@@ -236,6 +250,10 @@ def main() -> None:
     args = parser.parse_args()
 
     actions = [parse_action(raw) for raw in args.action] or [parse_action("animation:4:basic readable animation loop")]
+    action_ids = [str(action["id"]) for action in actions]
+    duplicate_ids = sorted({action_id for action_id in action_ids if action_ids.count(action_id) > 1})
+    if duplicate_ids:
+        raise SystemExit(f"duplicate action ids are not allowed: {', '.join(duplicate_ids)}")
     total_frames = sum(int(action["frames"]) for action in actions)
     grid_rows = args.grid_rows or math.ceil(total_frames / args.grid_columns)
     if args.grid_columns <= 0 or grid_rows <= 0:
