@@ -68,6 +68,14 @@ Frame-count guidance:
 
 When the requested frame count is over 8 for one continuous generated strip, warn the user and recommend a split plan before generating.
 
+Spritesheet layout guidance:
+
+- Default spritesheet layout is `action-rows`: one action per row, with `grid_columns` cells available for every action.
+- Recommend `grid_columns` as the maximum frame count of any action, normally 8. If an action uses fewer frames than `grid_columns`, the remaining cells in that row are transparent.
+- In the initial plan, describe row allocation explicitly, for example: `sleep-snore: 4 frames + 4 transparent cells`, `walk-left: 8 frames`, `sit-breathe: 4 frames + 4 transparent cells`, `groom: 6 frames + 2 transparent cells`.
+- If any action needs more than `grid_columns` frames, split it into multiple actions/rows before generation instead of letting it wrap into the next row.
+- Use packed sequential layout only when the user explicitly asks to minimize sheet area or requests a packed grid.
+
 ## Deterministic Assembly
 
 Do not rely on an image model to create final spritesheet geometry. Generated images may look like a grid while still having uneven row heights, inconsistent gutters, or no real alpha channel.
@@ -97,6 +105,8 @@ height = grid_rows * cell_height
 ```
 
 Every used cell must contain one centered frame. Every unused cell must be fully transparent.
+
+For the default `action-rows` layout, used cells are determined per row, not by a continuous global frame count. For example, in an `8x4` sheet with four actions of `4, 8, 4, 6` frames, row 0 columns 4-7, row 2 columns 4-7, and row 3 columns 6-7 must be transparent.
 
 ## Layout Guides
 
@@ -133,7 +143,7 @@ Ask only when the missing choice materially changes the output. Otherwise choose
 
 - `single sprite`: one transparent PNG or WebP
 - `action strip`: one horizontal strip per action
-- `spritesheet`: grid of generated frames with a manifest
+- `spritesheet`: one action per row with transparent unused cells and a manifest, unless packed layout is explicitly requested
 - `cell size`: 64x64 for tiny game assets, 96x96 for readable character sprites, 128x128 for detailed mascots, or user-specified
 - `frame count`: 4 frames for simple loops, 6 frames for expressive loops, 8 frames for locomotion or combat actions
 - `background`: flat chroma-key background first, then remove to alpha with deterministic local processing
@@ -166,7 +176,7 @@ Keep project-bound final files in the current workspace unless the user names a 
    - Use chroma-key generation for transparent assets. Do not rely on model-native transparency in the built-in path.
    - Assemble strips or sheets only from generated outputs using deterministic scripts.
    - Preserve transparent unused cells if a grid contains blank slots.
-   - Write a small manifest with `cell_width`, `cell_height`, `actions`, frame counts, and durations when producing animation assets.
+   - Write a small manifest with `cell_width`, `cell_height`, `layout_mode`, `actions`, frame counts, row/column cells, transparent unused cells, and durations when producing animation assets.
 
 5. Review before delivery:
    - Inspect the final PNG/WebP and any contact sheet or preview.
@@ -186,7 +196,7 @@ Avoid: text, labels, watermark, scenery, floor shadow, contact shadow, glow, blu
 
 ```text
 Create a horizontal pixel-art animation strip for <action>.
-Frame layout: exactly <N> separate full-body frames, evenly spaced left to right, each fitting inside a <W>x<H> cell with generous padding.
+Frame layout: exactly <N> separate full-body frames, evenly spaced left to right, each fitting inside a <W>x<H> cell with generous padding. Keep the visible sprite size and bounding box consistent between frames.
 Identity lock: preserve the same character/object as the canonical base: silhouette, proportions, face, palette, markings, outfit, props, and outline weight.
 Animation: <action-specific pose progression>.
 Style: crisp pixel-art sprite, chunky silhouette, dark 1-2 px outline, limited palette, flat cel shading.
@@ -243,6 +253,7 @@ Do not call the asset complete until these pass:
 - `qa/review.json` has no errors.
 - Component extraction was used, unless slot extraction was explicitly allowed after visual review.
 - Every frame fits inside its cell with no clipping.
+- No frame is noticeably larger or smaller than adjacent frames in the same action unless the action explicitly calls for scale change.
 - Transparent output has clean alpha and no visible chroma-key fringe.
 - Character identity is consistent across frames and actions.
 - The animation progression is readable and not just repeated copies.

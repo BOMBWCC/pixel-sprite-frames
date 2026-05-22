@@ -39,6 +39,8 @@ def main() -> None:
     cell_width = int(request["cell_width"])
     cell_height = int(request["cell_height"])
     frame_count = int(request["total_frames"])
+    layout_mode = str(request.get("layout_mode", "packed"))
+    used_indices = {int(cell["index"]) for cell in manifest.get("cells", []) if isinstance(cell, dict) and "index" in cell}
     scaled_w = max(1, round(cell_width * args.scale))
     scaled_h = max(1, round(cell_height * args.scale))
     sheet_width = columns * scaled_w
@@ -59,14 +61,15 @@ def main() -> None:
             label = f"{index}"
             if index in cells:
                 label = f"{index} {cells[index].get('action', '')}".strip()
-            draw.rectangle((x, y, x + scaled_w - 1, y + LABEL_HEIGHT - 1), fill="#111111" if index < frame_count else "#555555")
+            used = index in used_indices if layout_mode == "action-rows" else index < frame_count
+            draw.rectangle((x, y, x + scaled_w - 1, y + LABEL_HEIGHT - 1), fill="#111111" if used else "#555555")
             draw.text((x + 4, y + 4), label, fill="#ffffff", font=font)
             crop = spritesheet.crop((column * cell_width, row * cell_height, (column + 1) * cell_width, (row + 1) * cell_height))
             crop = crop.resize((scaled_w, scaled_h), Image.Resampling.NEAREST)
             bg = checker((scaled_w, scaled_h))
             bg.paste(crop, (0, 0), crop)
             output_sheet.paste(bg, (x, y + LABEL_HEIGHT))
-            outline = "#18a058" if index < frame_count else "#cc3344"
+            outline = "#18a058" if used else "#cc3344"
             draw.rectangle((x, y + LABEL_HEIGHT, x + scaled_w - 1, y + LABEL_HEIGHT + scaled_h - 1), outline=outline)
 
     output = Path(args.output).expanduser().resolve() if args.output else run_dir / "qa" / "contact-sheet.png"

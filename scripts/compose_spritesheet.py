@@ -34,28 +34,41 @@ def main() -> None:
     cell_height = int(request["cell_height"])
     columns = int(request["grid_columns"])
     rows = int(request["grid_rows"])
+    layout_mode = str(request.get("layout_mode", "packed"))
     sheet = Image.new("RGBA", (columns * cell_width, rows * cell_height), (0, 0, 0, 0))
 
     cells = []
     frame_index = 0
-    for action in frames_manifest["actions"]:
+    for action_row, action in enumerate(frames_manifest["actions"]):
+        if layout_mode == "action-rows" and action_row >= rows:
+            raise SystemExit(f"not enough rows for action {action['action']}; grid has {rows} rows")
         for frame_info in action["frames"]:
-            if frame_index >= columns * rows:
-                raise SystemExit(f"too many frames for {columns}x{rows} grid")
+            if layout_mode == "action-rows":
+                column = int(frame_info["action_index"])
+                row = action_row
+                if column >= columns:
+                    raise SystemExit(f"action {action['action']} has more frames than the {columns}-cell row can hold")
+                cell_index = row * columns + column
+            else:
+                if frame_index >= columns * rows:
+                    raise SystemExit(f"too many frames for {columns}x{rows} grid")
+                column = frame_index % columns
+                row = frame_index // columns
+                cell_index = frame_index
             frame_path = run_dir / frame_info["path"]
             with Image.open(frame_path) as opened:
                 frame = opened.convert("RGBA")
             if frame.size != (cell_width, cell_height):
                 frame = frame.resize((cell_width, cell_height), Image.Resampling.NEAREST)
-            column = frame_index % columns
-            row = frame_index // columns
             left = column * cell_width
             top = row * cell_height
             sheet.alpha_composite(frame, (left, top))
             cells.append({
-                "index": frame_index,
+                "index": cell_index,
                 "action": action["action"],
                 "action_index": frame_info["action_index"],
+                "row": row,
+                "column": column,
                 "x": left,
                 "y": top,
                 "width": cell_width,
@@ -79,6 +92,7 @@ def main() -> None:
         "height": sheet.height,
         "columns": columns,
         "rows": rows,
+        "layout_mode": layout_mode,
         "cell_width": cell_width,
         "cell_height": cell_height,
         "frame_duration_ms": request.get("frame_duration_ms", 100),

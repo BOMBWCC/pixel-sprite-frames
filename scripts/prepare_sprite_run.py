@@ -24,6 +24,8 @@ CHROMA_KEY_CANDIDATES = [
 MAX_FRAMES_PER_STRIP = 8
 DEFAULT_CELL_WIDTH = 128
 DEFAULT_CELL_HEIGHT = 128
+LAYOUT_PACKED = "packed"
+LAYOUT_ACTION_ROWS = "action-rows"
 
 
 ACTION_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -172,15 +174,32 @@ Background: perfectly flat solid {chroma_key["name"]} {chroma_key["hex"]} chroma
 Avoid: scenery, floor plane, cast shadow, contact shadow, glow, text, labels, watermark, checkerboard transparency, frame numbers, visible grid, cropped body parts."""
 
 
-def strip_prompt(action: dict[str, object], subject: str, style_notes: str, chroma_key: dict[str, object], cell_width: int, cell_height: int) -> str:
+def strip_prompt(
+    action: dict[str, object],
+    subject: str,
+    style_notes: str,
+    chroma_key: dict[str, object],
+    cell_width: int,
+    cell_height: int,
+    grid_columns: int,
+    layout_mode: str,
+) -> str:
     frames = int(action["frames"])
+    row_note = ""
+    if layout_mode == LAYOUT_ACTION_ROWS:
+        empty = grid_columns - frames
+        row_note = (
+            f"\nFinal spritesheet row plan: this action will occupy one full {grid_columns}-cell row; "
+            f"generate only the first {frames} poses for this action. The remaining {empty} final row cells "
+            "will be transparent and must not be represented in the generated strip."
+        )
     return f"""Create one horizontal pixel-art animation strip for action `{action["id"]}`.
 
 Use the attached canonical base sprite and any user reference images as the identity lock. Use the attached layout guide only for frame count, equal slot spacing, centering, and safe padding. Do not copy any visible guide lines, labels, colors, boxes, or marks.
 
 Subject: {subject}.
 Action progression: {action["description"]}.
-Frame layout: exactly {frames} full-body frames, left to right, one complete pose per invisible {cell_width}x{cell_height} cell. Keep each pose centered inside its cell with safe transparent padding. No pose may cross into a neighboring slot.
+Frame layout: exactly {frames} full-body frames, left to right, one complete pose per invisible {cell_width}x{cell_height} cell. Keep each pose centered inside its cell with safe transparent padding. Keep the visible sprite size and bounding box consistent from frame to frame; do not let one pose become noticeably larger or smaller than the others. No pose may cross into a neighboring slot.{row_note}
 Identity lock: preserve the same silhouette, proportions, face, palette, markings, outfit, props, outline weight, and facing logic from the canonical base.
 Style: compact readable pixel-art-adjacent game sprite, chunky silhouette, crisp stepped edges, dark 1-2 px outline, limited palette, flat cel shading, no soft gradients.
 Additional style notes: {style_notes or "none"}.
@@ -239,6 +258,7 @@ def main() -> None:
     parser.add_argument("--action", action="append", default=[], help="Format: id:frames:description. Repeat for multiple strips.")
     parser.add_argument("--grid-columns", type=int, default=4)
     parser.add_argument("--grid-rows", type=int, default=0, help="Defaults to enough rows for all frames.")
+    parser.add_argument("--layout-mode", choices=[LAYOUT_ACTION_ROWS, LAYOUT_PACKED], default=LAYOUT_ACTION_ROWS, help="action-rows keeps one action per row with transparent unused cells; packed fills cells sequentially.")
     parser.add_argument("--cell-width", type=int, default=DEFAULT_CELL_WIDTH)
     parser.add_argument("--cell-height", type=int, default=DEFAULT_CELL_HEIGHT)
     parser.add_argument("--frame-duration-ms", type=int, default=100)
@@ -255,7 +275,18 @@ def main() -> None:
     if duplicate_ids:
         raise SystemExit(f"duplicate action ids are not allowed: {', '.join(duplicate_ids)}")
     total_frames = sum(int(action["frames"]) for action in actions)
-    grid_rows = args.grid_rows or math.ceil(total_frames / args.grid_columns)
+    if args.layout_mode == LAYOUT_ACTION_ROWS:
+        too_wide = [f"{action['id']}:{action['frames']}" for action in actions if int(action["frames"]) > args.grid_columns]
+        if too_wide:
+            raise SystemExit(
+                f"layout-mode {LAYOUT_ACTION_ROWS} requires each action to fit in one row of {args.grid_columns} cells; "
+                f"split these actions or increase --grid-columns: {', '.join(too_wide)}"
+            )
+        grid_rows = args.grid_rows or len(actions)
+        if grid_rows < len(actions):
+            raise SystemExit(f"layout-mode {LAYOUT_ACTION_ROWS} needs at least one row per action ({len(actions)} rows)")
+    else:
+        grid_rows = args.grid_rows or math.ceil(total_frames / args.grid_columns)
     if args.grid_columns <= 0 or grid_rows <= 0:
         raise SystemExit("grid columns and rows must be positive")
     if total_frames > args.grid_columns * grid_rows:
@@ -299,6 +330,7 @@ def main() -> None:
         "cell_height": args.cell_height,
         "grid_columns": args.grid_columns,
         "grid_rows": grid_rows,
+        "layout_mode": args.layout_mode,
         "total_frames": total_frames,
         "frame_duration_ms": args.frame_duration_ms,
         "actions": actions,
@@ -311,7 +343,10 @@ def main() -> None:
     (run_dir / "sprite_request.json").write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
     write_text(run_dir / "prompts/base-sprite.md", base_prompt(args.subject, args.style_notes, chroma_key, args.cell_width, args.cell_height))
     for action in actions:
-        write_text(run_dir / "prompts/actions" / f"{action['id']}.md", strip_prompt(action, args.subject, args.style_notes, chroma_key, args.cell_width, args.cell_height))
+        write_text(
+            run_dir / "prompts/actions" / f"{action['id']}.md",
+            strip_prompt(action, args.subject, args.style_notes, chroma_key, args.cell_width, args.cell_height, args.grid_columns, args.layout_mode),
+        )
 
     jobs = {"schema_version": 1, "created_at": datetime.now(timezone.utc).isoformat(), "run_dir": str(run_dir), "primary_generation_skill": "$imagegen", "jobs": make_jobs(run_dir, copied_refs, actions)}
     (run_dir / "imagegen-jobs.json").write_text(json.dumps(jobs, indent=2) + "\n", encoding="utf-8")

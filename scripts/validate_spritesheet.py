@@ -14,6 +14,20 @@ def alpha_nonzero_count(image: Image.Image) -> int:
     return sum(image.getchannel("A").histogram()[1:])
 
 
+def used_cells_for_action_rows(request: dict[str, object], columns: int) -> set[int]:
+    used: set[int] = set()
+    actions = request.get("actions", [])
+    if not isinstance(actions, list):
+        return used
+    for row, action in enumerate(actions):
+        if not isinstance(action, dict):
+            continue
+        frames = int(action.get("frames", 0))
+        for column in range(min(frames, columns)):
+            used.add(row * columns + column)
+    return used
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("spritesheet")
@@ -37,6 +51,8 @@ def main() -> None:
     cell_width = args.cell_width or int(request.get("cell_width", 0))
     cell_height = args.cell_height or int(request.get("cell_height", 0))
     expected_frames = args.expected_frames or int(request.get("total_frames", columns * rows))
+    layout_mode = str(request.get("layout_mode", "packed"))
+    row_used_cells = used_cells_for_action_rows(request, columns) if layout_mode == "action-rows" else set()
     if not all([columns, rows, cell_width, cell_height]):
         raise SystemExit("columns, rows, cell width, and cell height are required")
 
@@ -62,7 +78,7 @@ def main() -> None:
         row = index // columns
         crop = image.crop((column * cell_width, row * cell_height, (column + 1) * cell_width, (row + 1) * cell_height))
         nontransparent = alpha_nonzero_count(crop)
-        used = index < expected_frames
+        used = index in row_used_cells if layout_mode == "action-rows" else index < expected_frames
         cells.append({"index": index, "row": row, "column": column, "used": used, "nontransparent_pixels": nontransparent})
         if used and nontransparent < args.min_used_pixels:
             errors.append(f"frame {index} is empty or too sparse ({nontransparent} pixels)")

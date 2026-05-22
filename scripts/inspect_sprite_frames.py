@@ -99,6 +99,7 @@ def inspect_action(
     warnings: list[str] = []
     frames: list[dict[str, object]] = []
     areas: list[int] = []
+    bbox_areas: list[int] = []
 
     if len(files) != expected_count:
         errors.append(f"expected {expected_count} frame files for {action_id}, found {len(files)}")
@@ -112,6 +113,9 @@ def inspect_action(
             frame = opened.convert("RGBA")
         nontransparent = alpha_nonzero_count(frame)
         bbox = frame.getbbox()
+        bbox_area = 0
+        if bbox:
+            bbox_area = max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
         edge_pixels = edge_alpha_count(frame, args.edge_margin)
         chroma_adjacent_pixels = chroma_adjacent_count(frame, chroma_key, args.chroma_adjacent_threshold)
         frames.append(
@@ -122,11 +126,13 @@ def inspect_action(
                 "height": frame.height,
                 "nontransparent_pixels": nontransparent,
                 "bbox": list(bbox) if bbox else None,
+                "bbox_area": bbox_area,
                 "edge_pixels": edge_pixels,
                 "chroma_adjacent_pixels": chroma_adjacent_pixels,
             }
         )
         areas.append(nontransparent)
+        bbox_areas.append(bbox_area)
         if frame.size != expected_size:
             errors.append(f"{action_id} frame {index:02d} is {frame.width}x{frame.height}; expected {expected_size[0]}x{expected_size[1]}")
         if nontransparent < args.min_used_pixels:
@@ -143,6 +149,13 @@ def inspect_action(
                 warnings.append(f"{action_id} frame {index:02d} is much smaller than the action median ({area} vs {row_median:.0f})")
             if row_median > 0 and area > row_median * args.large_outlier_ratio:
                 warnings.append(f"{action_id} frame {index:02d} is much larger than the action median ({area} vs {row_median:.0f})")
+    if bbox_areas:
+        bbox_median = median(bbox_areas)
+        for index, bbox_area in enumerate(bbox_areas[:expected_count]):
+            if bbox_median > 0 and bbox_area < bbox_median * args.small_bbox_outlier_ratio:
+                warnings.append(f"{action_id} frame {index:02d} has a much smaller visible bounding box than the action median ({bbox_area} vs {bbox_median:.0f})")
+            if bbox_median > 0 and bbox_area > bbox_median * args.large_bbox_outlier_ratio:
+                warnings.append(f"{action_id} frame {index:02d} has a much larger visible bounding box than the action median ({bbox_area} vs {bbox_median:.0f})")
 
     return {
         "action": action_id,
@@ -167,6 +180,8 @@ def main() -> None:
     parser.add_argument("--chroma-adjacent-pixel-threshold", type=int, default=800)
     parser.add_argument("--small-outlier-ratio", type=float, default=0.35)
     parser.add_argument("--large-outlier-ratio", type=float, default=2.75)
+    parser.add_argument("--small-bbox-outlier-ratio", type=float, default=0.60)
+    parser.add_argument("--large-bbox-outlier-ratio", type=float, default=1.45)
     parser.add_argument("--require-components", action="store_true", help="Fail actions that fell back to equal-slot extraction.")
     args = parser.parse_args()
 
