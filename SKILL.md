@@ -95,7 +95,7 @@ The normal pipeline is:
 3. Record the selected base image with `record_sprite_result.py`; this creates `references/canonical-base.png`.
 4. Generate each action strip with `$imagegen`, attaching the canonical base, user references, and the matching layout guide.
 5. Record each selected strip with `record_sprite_result.py`.
-6. Finalize the run. `finalize_sprite_run.py` removes chroma key, extracts uniform cells, writes `qa/review.json`, composes the strict grid, validates alpha/grid geometry, and creates a contact sheet.
+6. Finalize the run. `finalize_sprite_run.py` removes chroma key with soft matte + despill, extracts uniform cells, writes `qa/review.json`, composes the strict grid, validates alpha/grid geometry, and creates a contact sheet.
 
 The final spritesheet must have exact dimensions:
 
@@ -121,6 +121,8 @@ The guide tells the image model:
 - no slot crossing
 
 The final generated strip must not visibly include guide boxes, guide colors, center marks, labels, grid lines, or frame numbers. Reject and regenerate strips that copy the guide.
+
+Chroma-key backgrounds must be pure, flat key color. Reject strips where the sprite uses key-colored or key-adjacent outlines/highlights, because those pixels either become transparent or survive as colored spill.
 
 The layout guide should prevent slot-crossing in normal outputs. Finalization still treats generated strips as untrusted input: extraction uses connected sprite components first when possible, falls back to equal slots only when component extraction cannot identify the requested frame count, and the contact sheet must be visually reviewed before acceptance. By default, finalization fails if an action falls back to slot extraction; rerun with `--allow-slot-extraction` only after visually accepting the contact sheet. If the contact sheet shows copied guide pixels, cropped poses, repeated tiles, edge slivers, or partial neighboring sprites, regenerate the smallest failing action strip.
 
@@ -174,6 +176,7 @@ Keep project-bound final files in the current workspace unless the user names a 
 
 4. Remove chroma key and assemble:
    - Use chroma-key generation for transparent assets. Do not rely on model-native transparency in the built-in path.
+   - Prefer a key color far from the subject palette. If the subject is black/dark, avoid magenta unless the user requests it; magenta often leaks into dark outlines as purple spill.
    - Assemble strips or sheets only from generated outputs using deterministic scripts.
    - Preserve transparent unused cells if a grid contains blank slots.
    - Write a small manifest with `cell_width`, `cell_height`, `layout_mode`, `actions`, frame counts, row/column cells, transparent unused cells, and durations when producing animation assets.
@@ -200,7 +203,7 @@ Frame layout: exactly <N> separate full-body frames, evenly spaced left to right
 Identity lock: preserve the same character/object as the canonical base: silhouette, proportions, face, palette, markings, outfit, props, and outline weight.
 Animation: <action-specific pose progression>.
 Style: crisp pixel-art sprite, chunky silhouette, dark 1-2 px outline, limited palette, flat cel shading.
-Background: perfectly flat solid <chroma-key> for background removal; no shadows, gradients, floor plane, texture, grid, labels, frame numbers, or guide marks.
+Background: perfectly flat pure <chroma-key> for background removal; no shadows, gradients, floor plane, texture, darker/lighter key-colored patches, grid, labels, frame numbers, or guide marks. Do not use <chroma-key>, pure key color, or key-adjacent colors in the sprite, outlines, highlights, shadows, props, or effects.
 Avoid: cropped body parts, overlapping frames, poses crossing into neighboring slots, repeated identical frames, detached effects, motion blur, speed lines, dust trails, glow, text, UI, watermark.
 ```
 
@@ -208,7 +211,7 @@ Avoid: cropped body parts, overlapping frames, poses crossing into neighboring s
 
 - `scripts/prepare_sprite_run.py`: creates a generic sprite run, layout guides, prompts, and imagegen job manifest.
 - `scripts/record_sprite_result.py`: records selected `$imagegen` outputs into the run and stores the canonical base.
-- `scripts/extract_strip_frames.py`: removes chroma-key background, extracts each action strip into uniform transparent frame cells using connected components first and equal slots as fallback, and writes `frames/frames-manifest.json`.
+- `scripts/extract_strip_frames.py`: removes chroma-key background with soft matte + despill, extracts each action strip into uniform transparent frame cells using connected components first and equal slots as fallback, and writes `frames/frames-manifest.json`.
 - `scripts/compose_spritesheet.py`: composes uniform frames into an exact grid PNG/WebP with `final/spritesheet-manifest.json`.
 - `scripts/validate_spritesheet.py`: checks exact dimensions, alpha channel, used/unused cells, and likely opaque-background failures.
 - `scripts/inspect_sprite_frames.py`: writes `qa/review.json` with per-action frame counts, extraction method, edge-pixel warnings, chroma-key residue checks, and size outlier checks.

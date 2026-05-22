@@ -14,9 +14,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 CHROMA_KEY_CANDIDATES = [
-    ("magenta", "#FF00FF"),
     ("cyan", "#00FFFF"),
     ("yellow", "#FFFF00"),
+    ("magenta", "#FF00FF"),
     ("blue", "#0000FF"),
     ("orange", "#FF7F00"),
     ("green", "#00FF00"),

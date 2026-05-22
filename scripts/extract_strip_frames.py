@@ -10,6 +10,9 @@ from pathlib import Path
 
 from PIL import Image
 
+KEY_DOMINANCE_THRESHOLD = 16.0
+ALPHA_NOISE_FLOOR = 8
+
 
 def parse_hex_color(value: str) -> tuple[int, int, int]:
     value = value.strip()
@@ -22,6 +25,85 @@ def color_distance(red: int, green: int, blue: int, key: tuple[int, int, int]) -
     return math.sqrt((red - key[0]) ** 2 + (green - key[1]) ** 2 + (blue - key[2]) ** 2)
 
 
+def channel_distance(rgb: tuple[int, int, int], key: tuple[int, int, int]) -> int:
+    return max(abs(rgb[0] - key[0]), abs(rgb[1] - key[1]), abs(rgb[2] - key[2]))
+
+
+def clamp_channel(value: float) -> int:
+    return max(0, min(255, int(round(value))))
+
+
+def smoothstep(value: float) -> float:
+    value = max(0.0, min(1.0, value))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def soft_alpha(distance: int, transparent_threshold: float, opaque_threshold: float) -> int:
+    if distance <= transparent_threshold:
+        return 0
+    if distance >= opaque_threshold:
+        return 255
+    ratio = (float(distance) - transparent_threshold) / (opaque_threshold - transparent_threshold)
+    return clamp_channel(255.0 * smoothstep(ratio))
+
+
+def spill_channels(key: tuple[int, int, int]) -> list[int]:
+    key_max = max(key)
+    if key_max < 128:
+        return []
+    return [index for index, value in enumerate(key) if value >= key_max - 16 and value >= 128]
+
+
+def key_channel_dominance(rgb: tuple[int, int, int], key: tuple[int, int, int]) -> float:
+    spill = spill_channels(key)
+    if not spill:
+        return 0.0
+    channels = [float(value) for value in rgb]
+    non_spill = [index for index in range(3) if index not in spill]
+    key_strength = min(channels[index] for index in spill) if len(spill) > 1 else channels[spill[0]]
+    non_key_strength = max((channels[index] for index in non_spill), default=0.0)
+    return key_strength - non_key_strength
+
+
+def dominance_alpha(rgb: tuple[int, int, int], key: tuple[int, int, int]) -> int:
+    spill = spill_channels(key)
+    if not spill:
+        return 255
+    channels = [float(value) for value in rgb]
+    non_spill = [index for index in range(3) if index not in spill]
+    key_strength = min(channels[index] for index in spill) if len(spill) > 1 else channels[spill[0]]
+    non_key_strength = max((channels[index] for index in non_spill), default=0.0)
+    dominance = key_strength - non_key_strength
+    if dominance <= 0:
+        return 255
+    denominator = max(1.0, float(max(key)) - non_key_strength)
+    alpha = 1.0 - min(1.0, dominance / denominator)
+    return clamp_channel(alpha * 255.0)
+
+
+def looks_key_colored(rgb: tuple[int, int, int], key: tuple[int, int, int], distance: int) -> bool:
+    if distance <= 32:
+        return True
+    return key_channel_dominance(rgb, key) >= KEY_DOMINANCE_THRESHOLD
+
+
+def cleanup_spill(rgb: tuple[int, int, int], key: tuple[int, int, int], alpha: int) -> tuple[int, int, int]:
+    if alpha >= 252:
+        return rgb
+    spill = spill_channels(key)
+    if not spill:
+        return rgb
+    channels = [float(value) for value in rgb]
+    non_spill = [index for index in range(3) if index not in spill]
+    if non_spill:
+        anchor = max(channels[index] for index in non_spill)
+        cap = max(0.0, anchor - 1.0)
+        for index in spill:
+            if channels[index] > cap:
+                channels[index] = cap
+    return (clamp_channel(channels[0]), clamp_channel(channels[1]), clamp_channel(channels[2]))
+
+
 def load_request(run_dir: Path) -> dict[str, object]:
     path = run_dir / "sprite_request.json"
     if not path.is_file():
@@ -29,14 +111,35 @@ def load_request(run_dir: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def remove_chroma_background(image: Image.Image, chroma_key: tuple[int, int, int], threshold: float) -> Image.Image:
+def remove_chroma_background(
+    image: Image.Image,
+    chroma_key: tuple[int, int, int],
+    threshold: float,
+    transparent_threshold: float,
+    despill: bool,
+) -> Image.Image:
     rgba = image.convert("RGBA")
     pixels = rgba.load()
     for y in range(rgba.height):
         for x in range(rgba.width):
             red, green, blue, alpha = pixels[x, y]
-            if color_distance(red, green, blue, chroma_key) <= threshold:
-                pixels[x, y] = (red, green, blue, 0)
+            rgb = (red, green, blue)
+            distance = channel_distance(rgb, chroma_key)
+            key_like = looks_key_colored(rgb, chroma_key, distance)
+            if key_like:
+                output_alpha = min(soft_alpha(distance, transparent_threshold, threshold), dominance_alpha(rgb, chroma_key))
+            else:
+                output_alpha = 255
+            output_alpha = int(round(output_alpha * (alpha / 255.0)))
+            if 0 < output_alpha <= ALPHA_NOISE_FLOOR:
+                output_alpha = 0
+            if output_alpha == 0:
+                pixels[x, y] = (0, 0, 0, 0)
+            elif despill and key_like:
+                red, green, blue = cleanup_spill(rgb, chroma_key, output_alpha)
+                pixels[x, y] = (red, green, blue, output_alpha)
+            else:
+                pixels[x, y] = (red, green, blue, output_alpha)
     return rgba
 
 
@@ -177,7 +280,9 @@ def main() -> None:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--actions", default="all", help="Comma-separated action ids or all.")
     parser.add_argument("--chroma-key")
-    parser.add_argument("--key-threshold", type=float, default=96.0)
+    parser.add_argument("--key-threshold", type=float, default=220.0, help="Opaque threshold for soft chroma-key removal.")
+    parser.add_argument("--transparent-threshold", type=float, default=12.0, help="Distance at or below which key-colored pixels become fully transparent.")
+    parser.add_argument("--no-despill", action="store_true", help="Disable key-color spill cleanup on soft matte edge pixels.")
     parser.add_argument("--padding", type=int, default=6)
     parser.add_argument(
         "--method",
@@ -206,7 +311,7 @@ def main() -> None:
         if not strip_path.is_file():
             raise SystemExit(f"missing generated strip for {action_id}: {strip_path}")
         with Image.open(strip_path) as opened:
-            strip = remove_chroma_background(opened, chroma_key, args.key_threshold)
+            strip = remove_chroma_background(opened, chroma_key, args.key_threshold, args.transparent_threshold, not args.no_despill)
         frames = None
         used_method = args.method
         if args.method in {"auto", "components"}:

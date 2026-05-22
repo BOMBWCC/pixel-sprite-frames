@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument("--allow-slot-extraction", action="store_true")
     parser.add_argument("--skip-extract", action="store_true")
     parser.add_argument("--skip-contact-sheet", action="store_true")
-    parser.add_argument("--key-threshold", type=float, default=96.0)
+    parser.add_argument("--key-threshold", type=float, default=220.0, help="Opaque threshold for soft chroma-key removal.")
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
