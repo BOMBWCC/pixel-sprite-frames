@@ -71,29 +71,36 @@ def infer_size_target(action: dict[str, object], cell_width: int, cell_height: i
         category = "lying-low"
         width_ratio = (0.75, 0.90)
         height_ratio = (0.35, 0.55)
+        ground_ratio = (0.70, 0.79)
     elif any(term in text for term in ("walk", "run", "locomotion", "move-left", "move-right")):
         category = "locomotion"
         width_ratio = (0.70, 0.88)
         height_ratio = (0.65, 0.85)
+        ground_ratio = (0.83, 0.94)
     elif any(term in text for term in ("groom", "clean", "lick", "wipe")):
         category = "upright-active"
         width_ratio = (0.55, 0.88)
         height_ratio = (0.70, 0.90)
+        ground_ratio = (0.92, 0.98)
     elif any(term in text for term in ("sit", "idle", "breathe", "breathing", "stand", "standing")):
         category = "upright-calm"
         width_ratio = (0.55, 0.88)
         height_ratio = (0.70, 0.90)
+        ground_ratio = (0.92, 0.98)
     else:
         category = "generic"
         width_ratio = (0.60, 0.85)
         height_ratio = (0.55, 0.85)
+        ground_ratio = (0.78, 0.95)
     return {
         "category": category,
         "bbox_width_px": pixel_range(cell_width, *width_ratio),
         "bbox_height_px": pixel_range(cell_height, *height_ratio),
+        "ground_anchor_y_px": pixel_range(cell_height, *ground_ratio),
         "bbox_width_ratio": list(width_ratio),
         "bbox_height_ratio": list(height_ratio),
-        "guidance": "Suggested target visible bounding-box range; QA warns when frames fall outside it.",
+        "ground_anchor_y_ratio": list(ground_ratio),
+        "guidance": "Suggested visible bounding-box and invisible ground-anchor range; QA warns when frames fall outside it.",
     }
 
 
@@ -239,6 +246,9 @@ def strip_prompt(
             f"{size_target['bbox_width_px'][0]}-{size_target['bbox_width_px'][1]} px wide and "
             f"{size_target['bbox_height_px'][0]}-{size_target['bbox_height_px'][1]} px tall inside each "
             f"{cell_width}x{cell_height} cell. Pose changes may alter shape, but the character should not noticeably scale up or shrink."
+            f"\nGround anchor: use an invisible ground line; keep the bottom of the paws/body/contact point around y="
+            f"{size_target['ground_anchor_y_px'][0]}-{size_target['ground_anchor_y_px'][1]} px in every frame. "
+            "Do not draw the ground line, floor, or shadow."
             "\nCore body color region: keep the main body/head mass similar in size and position between frames; limbs, tail, tongue, and tiny highlights may vary."
         )
     return f"""Create one horizontal pixel-art animation strip for action `{action["id"]}`.

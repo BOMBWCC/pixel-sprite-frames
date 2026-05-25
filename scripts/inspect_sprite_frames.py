@@ -137,6 +137,7 @@ def inspect_action(
     frames: list[dict[str, object]] = []
     areas: list[int] = []
     bbox_areas: list[int] = []
+    ground_ys: list[int] = []
     core_areas: list[int] = []
 
     if len(files) != expected_count:
@@ -173,6 +174,7 @@ def inspect_action(
                 "height": frame.height,
                 "nontransparent_pixels": nontransparent,
                 "bbox": list(bbox) if bbox else None,
+                "ground_anchor_y": bbox[3] if bbox else None,
                 "bbox_area": visible_bbox_area,
                 "core_body_pixels": core_body_pixels,
                 "core_body_bbox": list(core_bbox) if core_bbox else None,
@@ -183,6 +185,8 @@ def inspect_action(
         )
         areas.append(nontransparent)
         bbox_areas.append(visible_bbox_area)
+        if bbox:
+            ground_ys.append(bbox[3])
         core_areas.append(core_body_area)
         if frame.size != expected_size:
             errors.append(f"{action_id} frame {index:02d} is {frame.width}x{frame.height}; expected {expected_size[0]}x{expected_size[1]}")
@@ -201,6 +205,12 @@ def inspect_action(
                 warnings.append(f"{action_id} frame {index:02d} visible bbox width {bbox_width}px is outside suggested {width_min}-{width_max}px")
             if bbox_height < int(height_min) or bbox_height > int(height_max):
                 warnings.append(f"{action_id} frame {index:02d} visible bbox height {bbox_height}px is outside suggested {height_min}-{height_max}px")
+            ground_target = size_target.get("ground_anchor_y_px")
+            if isinstance(ground_target, list) and len(ground_target) == 2:
+                ground_min, ground_max = ground_target
+                ground_y = bbox[3]
+                if ground_y < int(ground_min) or ground_y > int(ground_max):
+                    warnings.append(f"{action_id} frame {index:02d} ground anchor y {ground_y}px is outside suggested {ground_min}-{ground_max}px")
 
     if areas:
         row_median = median(areas)
@@ -216,6 +226,11 @@ def inspect_action(
                 warnings.append(f"{action_id} frame {index:02d} has a much smaller visible bounding box than the action median ({bbox_area} vs {bbox_median:.0f})")
             if bbox_median > 0 and bbox_area > bbox_median * args.large_bbox_outlier_ratio:
                 warnings.append(f"{action_id} frame {index:02d} has a much larger visible bounding box than the action median ({bbox_area} vs {bbox_median:.0f})")
+    if ground_ys:
+        ground_median = median(ground_ys)
+        for index, ground_y in enumerate(ground_ys[:expected_count]):
+            if abs(ground_y - ground_median) > args.ground_anchor_tolerance_px:
+                warnings.append(f"{action_id} frame {index:02d} ground anchor y {ground_y}px differs from the action median {ground_median:.0f}px by more than {args.ground_anchor_tolerance_px}px")
     if core_areas:
         core_median = median(core_areas)
         for index, core_area in enumerate(core_areas[:expected_count]):
@@ -252,6 +267,7 @@ def main() -> None:
     parser.add_argument("--large-bbox-outlier-ratio", type=float, default=1.45)
     parser.add_argument("--small-core-body-outlier-ratio", type=float, default=0.65)
     parser.add_argument("--large-core-body-outlier-ratio", type=float, default=1.40)
+    parser.add_argument("--ground-anchor-tolerance-px", type=int, default=6)
     parser.add_argument("--require-components", action="store_true", help="Fail actions that fell back to equal-slot extraction.")
     args = parser.parse_args()
 
